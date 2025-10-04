@@ -1,0 +1,373 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Importation des librairies
+```{r}
+library(bayesmix)
+library(MASS)
+library(label.switching)
+library(ggplot2)
+library(LaplacesDemon)
+```
+
+On Importe les données
+```{r}
+gal = MASS::galaxies
+gal = gal/1000
+N = length(gal)
+K = 3
+Nbrep = 13000
+burnin = 3000
+kappa0 = 1/10
+mu0 = 20.8
+nu0 = 100
+Lambda0 = 100
+
+ProbMU <- function(MU){
+  i = dnorm(MU[1], 0, 0.01, log=TRUE)
+  for(j in 2:K){
+    i = i + dnorm(MU[j], 0, 0.01, log=TRUE)
+  }
+  return(i)
+}
+
+
+ProbSIGMA <- function(SIGMA){
+  i = dinvgamma(SIGMA[1], 0.01, 0.01, log=TRUE)
+  for(j in 2:K){
+    i = i + dinvgamma(SIGMA[j], 0.01, 0.01, log=TRUE)
+  }
+  return(i)
+}
+
+
+ProbPI <- function(PI){
+  i = ddirichlet(PI, rep(1,K), log=TRUE)
+  return(i)
+}
+
+
+ProbLikelihood <- function(mu, sigma, pi, X){
+  
+  val = 1
+  for (i in 1:length(gal)){
+    labrador = 0
+    for(j in 1:K){
+      
+      labrador = labrador + pi[j]*dnorm(X[i],mu[j],sigma[j])
+      
+    }
+    val = val * labrador
+  }
+  return(log(val))
+  
+}
+
+tirerSigma = function(Z){
+  sigmas = rep(0,K)
+  valeurs_tirage = 1/2 * (Lambda0 + schapeau(Z)+ (kappa0*m(Z))/(kappa0+m(Z)) *(xbarre(Z)-mu0)**2)
+  
+  for(i in 1:K){
+    sigmas[i] = rinvgamma(1, (nu0+m(Z)[i])/2, valeurs_tirage[i])
+  }
+  
+  return(sigmas)
+}
+
+tirerMu = function(Z, sigma){
+  mus = rep(0,K)
+  valeur = sigma/(kappa0+m(Z))
+  valeur[is.infinite(valeur)] = 1e300
+  for(i in 1:K){
+    mus[i] = rnorm(1, epsilon(Z)[i], sqrt(valeur[i]))
+  }
+  return(mus)
+}
+
+
+tirerPi = function(Z){
+  alpha = rep(1, dim(Z)[2])
+  return(rdirichlet(1, alpha + m(Z)))
+}
+
+tirerZ = function(Pi, Mu, Sigma){
+  
+  Z = matrix(0, nrow=N, ncol=K)
+  
+  l = matrix(0, nrow=N, ncol=K)
+    
+  for(k in 1:K) {
+    l[,k] = Pi[k] * dnorm(gal, Mu[k], sqrt(Sigma[k]))
+  }
+  
+  l_sum = rowSums(l)
+  l = l / l_sum
+  
+  #l[is.na(l)] = 0
+  
+  for (i in 1:N) {
+    Z[i,] = t(rmultinom(1, 1, l[i,])) 
+  }
+  return(Z)
+}
+
+f <- function(xi, mut, sigmat, pit){ 
+  K = length(pit)
+  val = 0
+  for(k in 1:K){
+    val = val + pit[k] * dnorm(xi, mean=mut[k],sd = sqrt(sigmat[k]))
+  }
+  return(val)
+}
+```
+
+
+```{r}
+# Les fonctions utiles pour les conjugate prior
+m <- function(Z){
+  return(colSums(Z))
+}
+
+xbarre <- function(Z){
+# Si une composante est nulle metrre xbarre à 0
+ div = 1/m(Z)
+ div[which(m(Z) == 0)] = 0
+ return(t(div * t(Z) %*% gal)) 
+}
+
+epsilon <- function(Z){
+  return((kappa0*mu0+m(Z)*xbarre(Z))/(kappa0+m(Z)))
+}
+
+schapeau <- function(Z){
+  return(colSums(Z *  (matrix(rep(gal,K),ncol = K) -  t(matrix(rep(xbarre(Z),N),nrow =K)))**2))
+}
+```
+
+
+```{r}
+BIC_K <- function(K){
+  #Constante des priors
+  #-----------------
+  alpha = rep(3,K)
+#---------------
+  # Initialisation de Z
+  #-----------------------
+  d = dist(gal)
+  clust = hclust(d, method = "ward.D")
+  groupe_init = cutree(clust, k= K)
+  
+  Z = matrix(0, nrow=N, ncol=K)
+  for(i in 1:N){
+    Z[i,groupe_init[i]] = 1
+  }
+  #------------------------
+  
+  #Boucle pour Gibbs
+  #------------------------
+  sigmaGibbs = matrix(rep(0,Nbrep*K), ncol=K)
+  muGibbs = matrix(rep(0,Nbrep*K), ncol=K)
+  piGibbs = matrix(rep(0,Nbrep*K), ncol=K)
+  ZGibbs = array(data=rep(0, Nbrep*K*N), dim=c(N,K,Nbrep))
+  
+  for(j in 1:Nbrep){
+    
+    sigma2 = tirerSigma(Z)
+    sigmaGibbs[j,] = sigma2
+    
+    mu = tirerMu(Z, sigma2)
+    muGibbs[j,] = mu
+    
+    pi = tirerPi(Z)
+    piGibbs[j,] = pi
+    Z = tirerZ(pi, mu, sigma2)
+    ZGibbs[,,j] = Z
+  }
+  #--------------------------
+  
+  
+  
+  #On enlève le burnin :
+  #-------------------
+  muGibbs = muGibbs[- rep(1:burnin),]
+  sigmaGibbs = sigmaGibbs[- rep(1:burnin),]
+  piGibbs = piGibbs[- rep(1:burnin),]
+  ZGibbs = ZGibbs[,,- rep(1:burnin)]
+  #--------------------
+  
+  
+  
+  
+  # Matrice contenant le groupe associer à chaque galaxies à chaque itération
+  #----------------------
+  Group = matrix(rep(0,N*(Nbrep-burnin)), ncol = N)
+  
+  for( i in 1:(Nbrep-burnin)){
+    for(j in 1:N){
+      Group[i,j] = which.max(ZGibbs[j,,i])  
+    }
+  }
+  #-----------------------
+  
+  
+  
+  
+  # Label switching
+  #---------------------
+  P = array(data=rep(0, (Nbrep-burnin)*K*N), dim=c(Nbrep-burnin,N,K))
+  
+  for(t in 1:(Nbrep-burnin)) {
+    l = matrix(0, nrow=N, ncol=K)
+    
+    for(k in 1:K) {
+      l[,k] = piGibbs[t,k] * dnorm(gal, muGibbs[t,k], sqrt(sigmaGibbs[t,k]))
+    }
+    
+    l_sum = rowSums(l)
+    P[t,,] = l / l_sum
+  }
+  
+  
+  p <- label.switching(method = "STEPHENS",z = Group, p= P,K = K)
+  
+  
+  # Creation de l'array MCMC contenant tous nos paramètres:
+  MCMC = array(data=rep(0,(Nbrep-burnin)*K*3),dim=c(Nbrep-burnin,K,3))
+  MCMC[,,1] = muGibbs
+  MCMC[,,2] = sigmaGibbs
+  MCMC[,,3] = piGibbs
+  
+  
+  # On permute désormais
+  PERMUT = permute.mcmc(MCMC, p$permutations$STEPHENS)
+  
+  MuP = PERMUT$output[,,1]
+  SigmaP = PERMUT$output[,,2]
+  PiP = PERMUT$output[,,3]
+  #---------------------------------
+  
+  
+  #MAP 
+  #-----------------
+  besti = 1
+  bestMU = MuP[1,]
+  bestSIGMA = SigmaP[1,]
+  bestPI = PiP[1,]
+  bestG = Group[1,]
+  bestTheta = ProbMU(bestMU)+ProbSIGMA(bestSIGMA)+ProbPI(bestPI)+ProbLikelihood(bestMU, bestSIGMA, bestPI, gal)
+  
+  for(i in 2:(Nbrep-burnin)){
+    tmpTheta = ProbMU(MuP[i,])+ProbSIGMA(SigmaP[i,])+ProbPI(PiP[i,])+ProbLikelihood(MuP[i,], SigmaP[i,], PiP[i,], gal)
+    if(tmpTheta > bestTheta){
+      bestMU = MuP[i,]
+      bestSIGMA = SigmaP[i,]
+      bestPI = PiP[i,]
+      bestG = Group[i,]
+      bestTheta = tmpTheta
+      besti = i
+    }
+  }
+  
+  #---------------------------
+  
+  
+  
+  
+  return(list(mu=bestMU, sigma=bestSIGMA, pi=bestPI, Z=P[besti,,], G = bestG))
+}
+```
+
+E(Mk)
+```{r}
+EMk <- function(Z, Gmk){
+  val = 0
+  for (i in 1:N) {
+    val = val + sum(Z[i,]*log(Z[i,]+.Machine$double.eps))
+  }
+  return(-val)
+}
+```
+
+
+Calcul du BIC
+```{r}
+Bics = c()
+ICL = c()
+Thetas = list()
+for (K in 2:10){
+  Nuk = 3*K-1
+  BestTheta = BIC_K(K)
+  Thetas[[length(Thetas)+1]] = BestTheta
+  BIC_Nuk = 2*ProbLikelihood(BestTheta$mu,BestTheta$sigma,BestTheta$pi,gal) - Nuk * log(N)
+  2*ProbLikelihood(BestTheta$mu,BestTheta$sigma,BestTheta$pi,gal) 
+  Bics = append(Bics,BIC_Nuk)
+  ICL = append(ICL,BIC_Nuk - EMk(BestTheta$Z, K))
+}
+Bics
+ICL
+```
+```{r}
+f <- function(xi, mut, sigmat, pit){ 
+  K = length(pit)
+  val = 0
+  for(k in 1:K){
+    val = val + pit[k] * dnorm(xi, mean=mut[k],sd = sqrt(sigmat[k]))
+  }
+  return(val)
+}
+```
+
+
+
+```{r}
+BNgroup = which.max(ICL)
+bictheta = which.max(Bics)
+
+clu = 10# Nombre de clusters
+
+#BNgroup = clu -1
+#bictheta = clu -1
+BestTheta = Thetas[[bictheta]]
+
+df = as.data.frame(gal)
+
+g1 <- ggplot(df,aes(x=gal))+
+  geom_histogram(mapping = aes(x = gal, y = ..density..), fill="steelblue", colour="black", binwidth=2)+
+  stat_function(fun = f, args = list(pit = BestTheta$pi, mut = BestTheta$mu, sigmat = BestTheta$sigma))+
+  xlab("galaxies")+
+  geom_point(aes(x=gal, y=0), color= BestTheta$G)+
+  scale_color_gradient()
+plot(g1)
+```
+
+
+
+```{r}
+library(mclust)
+BIC <- mclustBIC(df)
+mod1 <- Mclust(df, x = BIC)
+summary(mod1)
+plot(mod1, what = "classification")
+
+
+df = as.data.frame(gal)
+
+g1 <- ggplot(df,aes(x=gal))+
+  geom_histogram(mapping = aes(x = gal, y = ..density..), fill="steelblue", colour="black", binwidth=2)+
+  stat_function(fun = f, args = list(pit = mod1$parameters$pro, mut = mod1$parameters$mean, sigmat = mod1$parameters$variance$sigmasq))+
+  xlab("galaxies")+
+  geom_point(aes(x=gal, y=0), color= mod1$classification)+
+  scale_color_gradient()
+plot(g1)
+```
+```{r}
+reskm = c()
+for (i in 1:10) {
+  km = kmeans(df, i, nstart=10)
+  reskm = append(reskm, km$tot.withinss)
+}
+plot(reskm)
+```
+

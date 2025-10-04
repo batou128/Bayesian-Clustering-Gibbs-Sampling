@@ -1,0 +1,264 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Importation des librairies
+```{r}
+library(bayesmix)
+library(MASS)
+library(label.switching)
+library(ggplot2)
+library(LaplacesDemon)
+```
+
+On Importe les données
+```{r}
+gal = MASS::galaxies
+gal = gal/1000
+```
+
+Déclaration des constantes
+```{r}
+K = 3 # Nombre de groupe
+Nbrep = 3000 # Nombre de pas du Gibbs sampler
+N = length(gal) # Nombre d'individu
+```
+
+Création du modèle pour le Gibbs Sampling
+```{r}
+priors <- BMMpriors(y = gal)
+ini = list(eta = c(1/3,1/3,1/3), mu = c(10,20,40), tau=c(1,1,1))
+model <- BMMmodel(y = gal, k = K, priors = priors, inits = ini)
+
+control <- JAGScontrol(
+  variables = c("mu", "tau", "eta", "S"),
+  n.iter = Nbrep,
+  burn.in = 1000,
+  thin = 1
+)
+
+```
+
+On fait tourner le Gibbs Sampler
+```{r}
+results <- JAGSrun(y = gal, prefix = "galaxies", model = model, control = control)
+posteriori <- BMMposteriori(results, plot = TRUE)
+
+# Dans results on a toutes les sorties que l'on souhaite. En utilisant posteriori on classe directement la data
+```
+
+On redéfini la sortie du Sampler pour avoir les données dans différentes matrices
+```{r}
+Group = results$results[,1:N]
+Pi = results$results[,(N+1):(N+1+K-1)]
+Mu = results$results[,(N+1+K):(N+1+2*K-1)]
+Sigma = results$results[,(N+1+2*K):(N+1+3*K-1)]
+```
+
+Fonction pour calculer la densité de la mixture gaussienne
+```{r}
+# Densité de notre loi de mixture gaussienne en xi
+f <- function(xi, mut, sigmat, pit){ 
+  val = 0
+  for(k in 1:K){
+    val = val + pit[k] * dnorm(xi, mean=mut[k],sd = sqrt(sigmat[k]))
+  }
+  return(val)
+}
+```
+
+
+```{r}
+DFMu = as.data.frame(Mu)
+DFMu$index = 1:nrow(DFMu)
+
+DFPi = as.data.frame(Pi)
+DFPi$index = 1:nrow(DFPi)
+
+DFSigma = as.data.frame(Sigma)
+DFSigma$index = 1:nrow(DFSigma)
+
+colnames(DFMu) = c("V1", "V2", "V3", "index")
+colnames(DFPi) = c("V1", "V2", "V3", "index")
+colnames(DFSigma) = c("V1", "V2", "V3", "index")
+
+g3 = ggplot(DFMu[2000:3000,])+
+  geom_line(aes(x=index,y=V1), color='blue')+
+  geom_line(aes(x=index,y=V2), color = 'green')+
+  geom_line(aes(x=index,y=V3), color = "yellow")
+plot(g3)
+
+g4 = ggplot(DFPi[2000:3000,])+
+  geom_line(aes(x=index,y=V1), color='blue')+
+  geom_line(aes(x=index,y=V2), color = 'green')+
+  geom_line(aes(x=index,y=V3), color = "yellow")
+
+plot(g4)
+
+g5 = ggplot(DFSigma[2000:3000,])+
+  geom_line(aes(x=index,y=V1), color='blue')+
+  geom_line(aes(x=index,y=V2), color = 'green')+
+  geom_line(aes(x=index,y=V3), color = "yellow")
+plot(g5)
+```
+
+
+
+Création de la matrice P pour le label switching
+```{r}
+# Construction de P pour le label switching
+P = array(data=rep(0, Nbrep*K*N), dim=c(Nbrep,N,K))
+
+for(t in 1:Nbrep) {
+  for(i in 1:N) {
+    l = rep(0,K) 
+    
+    for(k in 1:K) {
+      l[k] = Pi[t,k] * f(gal[i], Mu[t,], Sigma[t,], Pi[t,])
+    }
+    
+    for(k in 1:K) {
+      P[t,i,k] = l[k]/sum(l)
+    }
+  }
+}
+```
+
+On fait le label switching puis on réassigne
+```{r}
+p <- label.switching(method = "STEPHENS",z = Group, p= P,K = K)
+
+
+# Creation de l'array MCMC contenant tous nos paramètres:
+MCMC = array(data=rep(0,Nbrep*K*3),dim=c(Nbrep,K,3))
+MCMC[,,1] = Mu
+MCMC[,,2] = Sigma
+MCMC[,,3] = Pi
+
+
+# On permute désormais
+PERMUT = permute.mcmc(MCMC, p$permutations$STEPHENS)
+
+MuP = PERMUT$output[,,1]
+SigmaP = PERMUT$output[,,2]
+PiP = PERMUT$output[,,3]
+```
+
+Ici le label switching empire les choses je pense que bayesmix le fait déjà lui-même
+
+Faire des plots
+```{r}
+DFMuP = as.data.frame(MuP)
+DFMuP$index = 1:nrow(DFMuP)
+
+DFPiP = as.data.frame(PiP)
+DFPiP$index = 1:nrow(DFPiP)
+
+DFSigmaP = as.data.frame(SigmaP)
+DFSigmaP$index = 1:nrow(DFSigmaP)
+
+colnames(DFMuP) = c("V1", "V2", "V3", "index")
+colnames(DFPiP) = c("V1", "V2", "V3", "index")
+colnames(DFSigmaP) = c("V1", "V2", "V3", "index")
+
+g3 = ggplot(DFMuP[2000:3000,])+
+  geom_line(aes(x=index,y=V1), color='blue')+
+  geom_line(aes(x=index,y=V2), color = 'green')+
+  geom_line(aes(x=index,y=V3), color = "yellow")
+plot(g3)
+
+g4 = ggplot(DFPiP[2000:3000,])+
+  geom_line(aes(x=index,y=V1), color='blue')+
+  geom_line(aes(x=index,y=V2), color = 'green')+
+  geom_line(aes(x=index,y=V3), color = "yellow")
+
+plot(g4)
+
+g5 = ggplot(DFSigmaP[2000:3000,])+
+  geom_line(aes(x=index,y=V1), color='blue')+
+  geom_line(aes(x=index,y=V2), color = 'green')+
+  geom_line(aes(x=index,y=V3), color = "yellow")
+plot(g5)
+```
+
+Faire le MAP
+Proba de MU
+```{r}
+ProbMU <- function(MU){
+  i = dnorm(MU[1], 0, 0.01, log=TRUE)
+  for(j in 2:K){
+    i = i + dnorm(MU[j], 0, 0.01, log=TRUE)
+  }
+  return(i)
+}
+```
+
+Proba de Sigma
+```{r}
+ProbSIGMA <- function(SIGMA){
+  i = dinvgamma(SIGMA[1], 0.01, 0.01, log=TRUE)
+  for(j in 2:K){
+    i = i + dinvgamma(SIGMA[j], 0.01, 0.01, log=TRUE)
+  }
+  return(i)
+}
+```
+
+Proba de Pi
+```{r}
+
+ProbPI <- function(PI){
+  i = ddirichlet(PI, rep(1,K), log=TRUE)
+  return(i)
+}
+```
+
+Likelihood
+```{r}
+ProbLikelihood <- function(mu, sigma, pi, X){
+  
+  val = 1
+  for (i in 1:length(gal)){
+    tmp = 0
+    for(j in 1:K){
+      
+      tmp = tmp + pi[j]*dnorm(X[i],mu[j],sqrt(sigma[j]))
+      
+    }
+    val = val * tmp
+  }
+  return(log(val))
+  
+}
+```
+
+
+```{r}
+bestMU = Mu[1,]
+bestSIGMA = Sigma[1,]
+bestPI = Pi[1,]
+bestG = Group[1,]
+bestPosteriori = ProbMU(bestMU)+ProbSIGMA(bestSIGMA)+ProbPI(bestPI)+ProbLikelihood(bestMU, bestSIGMA, bestPI, gal)
+
+for(i in 2:3000){
+  posteriori = ProbMU(Mu[i,])+ProbSIGMA(Sigma[i,])+ProbPI(Pi[i,])+ProbLikelihood(Mu[i,], Sigma[i,], Pi[i,], gal)
+  if(posteriori > bestPosteriori){
+    bestMU = Mu[i,]
+    bestSIGMA = Sigma[i,]
+    bestPI = Pi[i,]
+    bestG = Group[i,]
+    bestPosteriori = posteriori
+  }
+}
+
+df = as.data.frame(gal)
+
+g1 <- ggplot(df,aes(x=gal))+
+  geom_histogram(mapping = aes(x = gal, y=..density..), fill="steelblue", colour="black", binwidth=2)+
+  stat_function(fun = f, args = list(pit = bestPI, mut = bestMU, sigmat = bestSIGMA))+
+  xlab("galaxies")+
+  geom_point(aes(x=gal, y=0), color= bestG)+
+  scale_color_gradient()
+plot(g1)
+```
